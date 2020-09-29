@@ -1,100 +1,39 @@
 import numpy as np
 import tensorflow as tf
 
-# Default hyperparameters
 hparams = tf.contrib.training.HParams(
-	# Comma-separated list of cleaners to run on text prior to training and eval. For non-English
-	# text, you may want to use "basic_cleaners" or "transliteration_cleaners".
-	cleaners='english_cleaners',
-
-
-	#If you only have 1 GPU or want to use only one GPU, please set num_gpus=0 and specify the GPU idx on run. example:
-		#expample 1 GPU of index 2 (train on "/gpu2" only): CUDA_VISIBLE_DEVICES=2 python train.py --model='Tacotron' --hparams='tacotron_gpu_start_idx=2'
-	#If you want to train on multiple GPUs, simply specify the number of GPUs available, and the idx of the first GPU to use. example:
-		#example 4 GPUs starting from index 0 (train on "/gpu0"->"/gpu3"): python train.py --model='Tacotron' --hparams='tacotron_num_gpus=4, tacotron_gpu_start_idx=0'
-	#The hparams arguments can be directly modified on this hparams.py file instead of being specified on run if preferred!
-
-	#If one wants to train both Tacotron and WaveNet in parallel (provided WaveNet will be trained on True mel spectrograms), one needs to specify different GPU idxes.
-	#example Tacotron+WaveNet on a machine with 4 or more GPUs. Two GPUs for each model: 
-		# CUDA_VISIBLE_DEVICES=0,1 python train.py --model='Tacotron' --hparams='tacotron_num_gpus=2'
-		# Cuda_VISIBLE_DEVICES=2,3 python train.py --model='WaveNet' --hparams='wavenet_num_gpus=2'
-
-	#IMPORTANT NOTES: The Multi-GPU performance highly depends on your hardware and optimal parameters change between rigs. Default are optimized for servers.
-	#If using N GPUs, please multiply the tacotron_batch_size by N below in the hparams! (tacotron_batch_size = 32 * N)
-	#Never use lower batch size than 32 on a single GPU!
-	#Same applies for Wavenet: wavenet_batch_size = 8 * N (wavenet_batch_size can be smaller than 8 if GPU is having OOM, minimum 2)
-	#Please also apply the synthesis batch size modification likewise. (if N GPUs are used for synthesis, minimal batch size must be N, minimum of 1 sample per GPU)
-	#We did not add an automatic multi-GPU batch size computation to avoid confusion in the user's mind and to provide more control to the user for
-	#resources related decisions.
-
-	#Acknowledgement:
-	#	Many thanks to @MlWoo for his awesome work on multi-GPU Tacotron which showed to work a little faster than the original
-	#	pipeline for a single GPU as well. Great work!
-
-	#Hardware setup: Default supposes user has only one GPU: "/gpu:0" (Both Tacotron and WaveNet can be trained on multi-GPU: data parallelization)
-	#Synthesis also uses the following hardware parameters for multi-GPU parallel synthesis.
-	tacotron_num_gpus = 1, #Determines the number of gpus in use for Tacotron training.
-	wavenet_num_gpus = 1, #Determines the number of gpus in use for WaveNet training.
-	split_on_cpu = True, #Determines whether to split data on CPU or on first GPU. This is automatically True when more than 1 GPU is used. 
-		#(Recommend: False on slow CPUs/Disks, True otherwise for small speed boost)
-	###########################################################################################################################################
-
-	#Audio
-	#Audio parameters are the most important parameters to tune when using this work on your personal data. Below are the beginner steps to adapt
-	#this work to your personal data:
-	#	1- Determine my data sample rate: First you need to determine your audio sample_rate (how many samples are in a second of audio). This can be done using sox: "sox --i <filename>"
-	#		(For this small tuto, I will consider 24kHz (24000 Hz), and defaults are 22050Hz, so there are plenty of examples to refer to)
-	#	2- set sample_rate parameter to your data correct sample rate
-	#	3- Fix win_size and and hop_size accordingly: (Supposing you will follow our advice: 50ms window_size, and 12.5ms frame_shift(hop_size))
-	#		a- win_size = 0.05 * sample_rate. In the tuto example, 0.05 * 24000 = 1200
-	#		b- hop_size = 0.25 * win_size. Also equal to 0.0125 * sample_rate. In the tuto example, 0.25 * 1200 = 0.0125 * 24000 = 300 (Can set frame_shift_ms=12.5 instead)
-	#	4- Fix n_fft, num_freq and upsample_scales parameters accordingly.
-	#		a- n_fft can be either equal to win_size or the first power of 2 that comes after win_size. I usually recommend using the latter
-	#			to be more consistent with signal processing friends. No big difference to be seen however. For the tuto example: n_fft = 2048 = 2**11
-	#		b- num_freq = (n_fft / 2) + 1. For the tuto example: num_freq = 2048 / 2 + 1 = 1024 + 1 = 1025.
-	#		c- For WaveNet, upsample_scales products must be equal to hop_size. For the tuto example: upsample_scales=[15, 20] where 15 * 20 = 300
-	#			it is also possible to use upsample_scales=[3, 4, 5, 5] instead. One must only keep in mind that upsample_kernel_size[0] = 2*upsample_scales[0]
-	#			so the training segments should be long enough (2.8~3x upsample_scales[0] * hop_size or longer) so that the first kernel size can see the middle 
-	#			of the samples efficiently. The length of WaveNet training segments is under the parameter "max_time_steps".
-	#	5- Finally comes the silence trimming. This very much data dependent, so I suggest trying preprocessing (or part of it, ctrl-C to stop), then use the
-	#		.ipynb provided in the repo to listen to some inverted mel/linear spectrograms. That will first give you some idea about your above parameters, and
-	#		it will also give you an idea about trimming. If silences persist, try reducing trim_top_db slowly. If samples are trimmed mid words, try increasing it.
-	#	6- If audio quality is too metallic or fragmented (or if linear spectrogram plots are showing black silent regions on top), then restart from step 2.
-	num_mels = 80, #Number of mel-spectrogram channels and local conditioning dimensionality
-	num_freq = 1025, # (= n_fft / 2 + 1) only used when adding linear spectrograms post processing network
-	rescale = True, #Whether to rescale audio prior to preprocessing
-	rescaling_max = 0.999, #Rescaling value
-
-	#train samples of lengths between 3sec and 14sec are more than enough to make a model capable of generating consistent speech.
-	clip_mels_length = True, #For cases of OOM (Not really recommended, only use if facing unsolvable OOM errors, also consider clipping your samples to smaller chunks)
-	max_mel_frames = 900,  #Only relevant when clip_mels_length = True, please only use after trying output_per_steps=3 and still getting OOM errors.
-
-	# Use LWS (https://github.com/Jonathan-LeRoux/lws) for STFT and phase reconstruction
-	# It's preferred to set True to use with https://github.com/r9y9/wavenet_vocoder
-	# Does not work if n_ffit is not multiple of hop_size!!
-	use_lws=False, #Only used to set as True if using WaveNet, no difference in performance is observed in either cases.
-	silence_threshold=2, #silence threshold used for sound trimming for wavenet preprocessing
+	cleaners='basic_cleaners',
+	tacotron_num_gpus = 1, 
+	wavenet_num_gpus = 1, 
+	split_on_cpu = True, 
+	num_mels = 80, 
+	num_freq = 1025,
+	rescale = True, 
+	rescaling_max = 0.999,
+	clip_mels_length = True,
+	max_mel_frames = 900, 
+	use_lws=False, 
+	silence_threshold=2,
 
 	#Mel spectrogram
-	n_fft = 2048, #Extra window size is filled with 0 paddings to match this parameter
-	hop_size = 275, #For 22050Hz, 275 ~= 12.5 ms (0.0125 * sample_rate)
-	win_size = 1100, #For 22050Hz, 1100 ~= 50 ms (If None, win_size = n_fft) (0.05 * sample_rate)
-	sample_rate = 22050, #22050 Hz (corresponding to ljspeech dataset) (sox --i <filename>)
-	frame_shift_ms = None, #Can replace hop_size parameter. (Recommended: 12.5)
-	magnitude_power = 2., #The power of the spectrogram magnitude (1. for energy, 2. for power)
+	n_fft = 2048, 
+	hop_size = 275,
+	win_size = 1100,
+	sample_rate = 22050,
+	frame_shift_ms = None,
+	magnitude_power = 2., 
 
-	#M-AILABS (and other datasets) trim params (there parameters are usually correct for any data, but definitely must be tuned for specific speakers)
-	trim_silence = True, #Whether to clip silence in Audio (at beginning and end of audio only, not the middle)
-	trim_fft_size = 2048, #Trimming window size
-	trim_hop_size = 512, #Trimmin hop length
-	trim_top_db = 40, #Trimming db difference from reference db (smaller==harder trim.)
+	#M-AILABS 
+	trim_silence = True,
+	trim_fft_size = 2048,
+	trim_hop_size = 512, 
+	trim_top_db = 40, 
 
 	#Mel and Linear spectrograms normalization/scaling and clipping
-	signal_normalization = True, #Whether to normalize mel spectrograms to some predefined range (following below parameters)
-	allow_clipping_in_normalization = True, #Only relevant if mel_normalization = True
-	symmetric_mels = True, #Whether to scale the data to be symmetric around 0. (Also multiplies the output range by 2, faster and cleaner convergence)
-	max_abs_value = 4., #max absolute value of data. If symmetric, data will be [-max, max] else [0, max] (Must not be too big to avoid gradient explosion, 
-																										  #not too small for fast convergence)
+	signal_normalization = True, 
+	allow_clipping_in_normalization = True,
+	symmetric_mels = True, 
+	max_abs_value = 4.,
 	normalize_for_wavenet = True, #whether to rescale to [0, 1] for wavenet. (better audio quality)
 	clip_for_wavenet = True, #whether to clip [-max, max] before training/synthesizing with wavenet (better audio quality)
 	wavenet_pad_sides = 1, #Can be 1 or 2. 1 for pad right only, 2 for both sides padding.
@@ -340,36 +279,28 @@ hparams = tf.contrib.training.HParams(
 	#Eval/Debug parameters
 	#Eval sentences (if no eval text file was specified during synthesis, these sentences are used for eval)
 	sentences = [
-	# From July 8, 2017 New York Times:
-	'Scientists at the CERN laboratory say they have discovered a new particle.',
-	'There\'s a way to measure the acute emotional intelligence that has never gone out of style.',
-	'President Trump met with other leaders at the Group of 20 conference.',
-	'The Senate\'s bill to repeal and replace the Affordable Care Act is now imperiled.',
-	# From Google's Tacotron example page:
-	'Generative adversarial network or variational auto-encoder.',
-	'Basilar membrane and otolaryngology are not auto-correlations.',
-	'He has read the whole thing.',
-	'He reads books.',
-	'He thought it was time to present the present.',
-	'Thisss isrealy awhsome.',
-	'The big brown fox jumps over the lazy dog.',
-	'Did the big brown fox jump over the lazy dog?',
-	"Peter Piper picked a peck of pickled peppers. How many pickled peppers did Peter Piper pick?",
-	"She sells sea-shells on the sea-shore. The shells she sells are sea-shells I'm sure.",
-	"Tajima Airport serves Toyooka.",
-	#From The web (random long utterance)
-	# 'On offering to help the blind man, the man who then stole his car, had not, at that precise moment, had any evil intention, quite the contrary, \
-	# what he did was nothing more than obey those feelings of generosity and altruism which, as everyone knows, \
-	# are the two best traits of human nature and to be found in much more hardened criminals than this one, a simple car-thief without any hope of advancing in his profession, \
-	# exploited by the real owners of this enterprise, for it is they who take advantage of the needs of the poor.',
-	# A final Thank you note!
-	'Thank you so much for your support!',
+	'நீங்கள் நேற்று கீரைப் பொறியல் சாப்பிட்டீர்களா?',
+	'அத்திம்பேர் அம்மாமி எனுந்தமிழ்தான் மீதம்!',
+	'கங்கை நதிப்புறத்துக் கோதுமைப் பண்டம்',
+	'கன்னல் பிழிந்து கலந்த கனிச்சாறே!',
+	'தூக்கி வந்து தொகையாய் எண்ணினான்.',
+	'காதலும் தானும் கனலும் புழுவுமாய்',
+	'கன்னி யனுப்பும் புதுப்பார்வை - அவன்',
+	'என்ன ஒரு அழகான கவிதை!',
+	'ஒன்றுபட்டுச் சிறந்தார் - இணை',
+	'அடுத்த மாடியிலே - நின்ற',
+	'மூலையிலோர் சிறுநூலும் புதுநூ லாயின்',
+	'ஏடெடுத் தேன்கவி ஒன்று வரைந்திட',
+	"வரக்கண்ட தும்குப்பன் வாரி அணைக்க",
+	"நலம்செய்தான்; ஒளிமுகத்தைக் காட்டிவிட்டான், காட்டி",
+	"புழுக்கமும் வியர்வையும் எழுப்பி என்னை",
+	'கூச்சல் குழப்பங்கள் கொத்தடி மைத்தனம்',
 	],
 
 	#Wavenet Debug
-	wavenet_synth_debug = False, #Set True to use target as debug in WaveNet synthesis. 
-	wavenet_debug_wavs = ['training_data/audio/audio-LJ001-0008.npy'], #Path to debug audios. Must be multiple of wavenet_num_gpus.
-	wavenet_debug_mels = ['training_data/mels/mel-LJ001-0008.npy'], #Path to corresponding mels. Must be of same length and order as wavenet_debug_wavs.
+	wavenet_synth_debug = False,
+	wavenet_debug_wavs = ['training_data/audio/audio-LJ001-0008.npy'],
+	wavenet_debug_mels = ['training_data/mels/mel-LJ001-0008.npy'], 
 
 	)
 

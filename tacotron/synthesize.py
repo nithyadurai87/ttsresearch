@@ -3,7 +3,6 @@ import os
 import re
 import time
 from time import sleep
-
 import tensorflow as tf
 from hparams import hparams, hparams_debug_string
 from infolog import log
